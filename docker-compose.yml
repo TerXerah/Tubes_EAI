@@ -1,0 +1,164 @@
+version: "3.8"
+# 8 Containers
+#   Application Layer  : pos-service, inventory-service, crm-service
+#   Integration Layer  : integration-service
+#   Infrastructure     : rabbitmq, postgres-pos, postgres-crm, mysql-inventory
+
+services:
+
+  #infrastructure
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS}
+    ports:
+      - "5672:5672"
+      - "15672:15672"   #port buat database
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - iae-network
+
+  postgres-pos:
+    image: postgres:15-alpine
+    container_name: postgres-pos
+    environment:
+      POSTGRES_USER: ${POS_DB_USER}
+      POSTGRES_PASSWORD: ${POS_DB_PASS}
+      POSTGRES_DB: ${POS_DB_NAME}
+    volumes:
+      - postgres_pos_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POS_DB_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - iae-network
+
+  postgres-crm:
+    image: postgres:15-alpine
+    container_name: postgres-crm
+    environment:
+      POSTGRES_USER: ${CRM_DB_USER}
+      POSTGRES_PASSWORD: ${CRM_DB_PASS}
+      POSTGRES_DB: ${CRM_DB_NAME}
+    volumes:
+      - postgres_crm_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CRM_DB_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - iae-network
+
+  mysql-inventory:
+    image: mysql:8.0
+    container_name: mysql-inventory
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASS}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - iae-network
+
+  #application layer
+  pos-service:
+    build: ./pos-service
+    container_name: pos-service
+    environment:
+      PORT: 8001
+      DB_HOST: postgres-pos
+      DB_PORT: 5432
+      DB_NAME: ${POS_DB_NAME}
+      DB_USER: ${POS_DB_USER}
+      DB_PASS: ${POS_DB_PASS}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres-pos:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - iae-network
+
+  inventory-service:
+    build: ./inventory-service
+    container_name: inventory-service
+    environment:
+      PORT: 8002
+      MYSQL_HOST: mysql-inventory
+      MYSQL_DB: ${MYSQL_DB}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASS: ${MYSQL_PASS}
+    ports:
+      - "8002:8002"
+    depends_on:
+      mysql-inventory:
+        condition: service_healthy
+    networks:
+      - iae-network
+
+  crm-service:
+    build: ./crm-service
+    container_name: crm-service
+    environment:
+      PORT: 8003
+      DB_HOST: postgres-crm
+      DB_PORT: 5432
+      DB_NAME: ${CRM_DB_NAME}
+      DB_USER: ${CRM_DB_USER}
+      DB_PASS: ${CRM_DB_PASS}
+    ports:
+      - "8003:8003"
+    depends_on:
+      postgres-crm:
+        condition: service_healthy
+    networks:
+      - iae-network
+
+  #integration layer
+  integration-service:
+    build: ./integration-service
+    container_name: integration-service
+    environment:
+      RABBITMQ_URL: amqp://${RABBITMQ_USER}:${RABBITMQ_PASS}@rabbitmq:5672
+      INVENTORY_SOAP_URL: http://inventory-service:8002/soap/inventory
+      CRM_API_URL: http://crm-service:8003/customers/update-from-sale
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      inventory-service:
+        condition: service_started
+      crm-service:
+        condition: service_started
+    networks:
+      - iae-network
+
+networks:
+  iae-network:
+    driver: bridge
+
+volumes:
+  rabbitmq_data:
+  postgres_pos_data:
+  postgres_crm_data:
+  mysql_data:

@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<title>Demo IAE - Integrasi POS, Inventory, CRM</title>
+<style>
+  body { font-family: Arial, sans-serif; max-width: 900px; margin: 30px auto; padding: 0 20px; background: #f4f6f8; }
+  h1 { color: #2c3e50; }
+  .card { background: #fff; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
+  h2 { margin-top: 0; color: #34495e; font-size: 18px; }
+  label { display: block; margin: 8px 0 4px; font-weight: bold; font-size: 14px; }
+  input, select { padding: 8px; width: 200px; border: 1px solid #ccc; border-radius: 4px; }
+  button { background: #2980b9; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin-top: 12px; font-size: 14px; }
+  button:hover { background: #1f618d; }
+  button.refresh { background: #27ae60; }
+  button.refresh:hover { background: #1e8449; }
+  pre { background: #2c3e50; color: #ecf0f1; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  th, td { border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 13px; }
+  th { background: #ecf0f1; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .status { font-weight: bold; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+  .ok { background: #d4efdf; color: #1e8449; }
+  .err { background: #fadbd8; color: #922b21; }
+</style>
+</head>
+<body>
+
+<h1>🔗 Integrasi Enterprise — POS → Inventory → CRM</h1>
+
+<!-- Health Check -->
+<div class="card">
+  <h2>Cek Status Service</h2>
+  <button onclick="checkHealth()">Check Service</button>
+  <div id="healthResult"></div>
+</div>
+
+<!-- Create Transaction -->
+<div class="card">
+  <h2>Buat Transaksi Penjualan (POS)</h2>
+  <label>Product ID</label>
+  <select id="product_id">
+    <option value="PRD-001">Cumi Hitam Pak Kris</option>
+    <option value="PRD-002">Oseng Oseng Biawak</option>
+    <option value="PRD-003">Tiket Whoosh</option>
+  </select>
+
+  <label>Quantity</label>
+  <input type="number" id="quantity" value="1" min="1">
+
+  <label>Customer ID</label>
+  <select id="customer_id">
+    <option value="CUST-042">Topek</option>
+    <option value="CUST-043">Cahyo</option>
+    <option value="CUST-044">Adi Hidayat</option>
+  </select>
+
+  <br>
+  <button onclick="createTransaction()">🛒 Buat Transaksi</button>
+  <pre id="transactionResult">Belum ada transaksi.</pre>
+</div>
+
+<div class="grid">
+  <!-- Inventory -->
+  <div class="card">
+    <h2>3. Stok Inventory</h2>
+    <button class="refresh" onclick="loadStock()">🔄 Refresh Stok</button>
+    <div id="stockTable"></div>
+  </div>
+
+  <!-- CRM -->
+  <div class="card">
+    <h2>4. Profil Pelanggan (CRM)</h2>
+    <button class="refresh" onclick="loadCustomers()">🔄 Refresh Pelanggan</button>
+    <div id="customerTable"></div>
+  </div>
+</div>
+
+<div class="card">
+  <p>📊 Untuk melihat alur pesan secara visual (queue, exchange), buka
+  <a href="http://localhost:15672" target="_blank">RabbitMQ Management UI</a>
+  (login: admin / admin123)</p>
+</div>
+
+<script>
+const POS = 'http://localhost:8001';
+const INV = 'http://localhost:8002';
+const CRM = 'http://localhost:8003';
+
+async function checkHealth() {
+  const el = document.getElementById('healthResult');
+  el.innerHTML = 'Mengecek...';
+  const services = [
+    {name: 'POS Service', url: POS + '/health'},
+    {name: 'Inventory Service', url: INV + '/health'},
+    {name: 'CRM Service', url: CRM + '/health'},
+  ];
+  let html = '<table><tr><th>Service</th><th>Status</th></tr>';
+  for (const s of services) {
+    try {
+      const res = await fetch(s.url);
+      const data = await res.json();
+      html += `<tr><td>${s.name}</td><td><span class="status ok">OK - ${data.service}</span></td></tr>`;
+    } catch (e) {
+      html += `<tr><td>${s.name}</td><td><span class="status err">TIDAK AKTIF</span></td></tr>`;
+    }
+  }
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+async function createTransaction() {
+  const product_id = document.getElementById('product_id').value;
+  const quantity = parseInt(document.getElementById('quantity').value);
+  const customer_id = document.getElementById('customer_id').value;
+  const el = document.getElementById('transactionResult');
+
+  el.textContent = 'Mengirim transaksi...';
+  try {
+    const res = await fetch(POS + '/transactions', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({product_id, quantity, customer_id})
+    });
+    const data = await res.json();
+    el.textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    el.textContent = 'ERROR: ' + e.message + '\n\nPastikan POS Service jalan di port 8001 dan tidak ada masalah CORS.';
+  }
+}
+
+async function loadStock() {
+  const el = document.getElementById('stockTable');
+  el.innerHTML = 'Memuat...';
+  try {
+    const res = await fetch(INV + '/stock');
+    const data = await res.json();
+    let html = '<table><tr><th>SKU</th><th>Produk</th><th>Qty</th></tr>';
+    data.forEach(row => {
+      html += `<tr><td>${row.sku_code}</td><td>${row.product_name}</td><td><b>${row.quantity}</b></td></tr>`;
+    });
+    html += '</table>';
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = '<span class="status err">Gagal memuat: ' + e.message + '</span>';
+  }
+}
+
+async function loadCustomers() {
+  const el = document.getElementById('customerTable');
+  el.innerHTML = 'Memuat...';
+  try {
+    const res = await fetch(CRM + '/customers');
+    const data = await res.json();
+    let html = '<table><tr><th>Customer</th><th>Nama</th><th>Poin</th><th>Total Belanja</th></tr>';
+    data.forEach(row => {
+      html += `<tr><td>${row.customer_id}</td><td>${row.name}</td><td><b>${row.loyalty_points}</b></td><td>Rp ${Number(row.total_purchases).toLocaleString('id-ID')}</td></tr>`;
+    });
+    html += '</table>';
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = '<span class="status err">Gagal memuat: ' + e.message + '</span>';
+  }
+}
+
+// Auto-load on page open
+checkHealth();
+loadStock();
+loadCustomers();
+</script>
+
+</body>
+</html>

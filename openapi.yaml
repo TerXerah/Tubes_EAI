@@ -1,0 +1,613 @@
+openapi: 3.0.3
+info:
+  title: Tubes IAE
+  description: |
+    Dokumentasi API untuk sistem integrasi enterprise retail.
+
+    Sistem terdiri dari 3 aplikasi mandiri (POS, Inventory, CRM)
+
+    **Alur Integrasi End-to-End:**
+    1. `POST /transactions` di POS Service → mempublikasikan event `SALE_COMPLETED`
+       (Canonical Data Model / CDM) ke RabbitMQ exchange `sales.broadcast`
+    2. Integration Service mengonsumsi event, lalu:
+       - Mengonversi CDM JSON → SOAP/XML, memanggil `POST /soap/inventory`
+       - Memetakan field CDM → CRM, memanggil `POST /customers/update-from-sale`
+
+  version: "1.0.0"
+
+servers:
+  - url: http://localhost:8001
+    description: POS Service
+  - url: http://localhost:8002
+    description: Inventory Service
+  - url: http://localhost:8003
+    description: CRM Service
+
+tags:
+  - name: POS Service
+  - name: Inventory Service
+  - name: CRM Service
+
+paths:
+  # POS SERVICE
+  /health:
+    get:
+      tags: [POS Service]
+      summary: Health check
+      servers:
+        - url: http://localhost:8001
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                service: pos-service
+
+  /products:
+    get:
+      tags: [POS Service]
+      summary: Daftar produk
+      servers:
+        - url: http://localhost:8001
+      responses:
+        "200":
+          description: Daftar produk
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Product'
+              example:
+                - product_id: PRD-001
+                  name: Cumi Hitam Pak Kris
+                  unit_price: 75000
+                - product_id: PRD-002
+                  name: Oseng Oseng Biawak
+                  unit_price: 45000
+
+  /transactions:
+    get:
+      tags: [POS Service]
+      summary: Daftar transaksi
+      servers:
+        - url: http://localhost:8001
+      responses:
+        "200":
+          description: Daftar transaksi
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Transaction'
+
+    post:
+      tags: [POS Service]
+      summary: Buat transaksi penjualan baru
+      description: |
+        Entry point alur integrasi end-to-end. Setelah transaksi dibuat,
+        service ini mempublikasikan event `SALE_COMPLETED` (CDM) ke
+        RabbitMQ exchange `sales.broadcast`, yang akan diteruskan ke
+        Inventory Service (SOAP/XML, kurangi stok) dan CRM Service
+        (REST/JSON, update loyalty point).
+      servers:
+        - url: http://localhost:8001
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransactionRequest'
+            example:
+              product_id: PRD-001
+              quantity: 2
+              customer_id: CUST-042
+      responses:
+        "201":
+          description: Transaksi berhasil dibuat & event dipublikasikan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionResponse'
+              example:
+                message: Transaction created and event published
+                transaction:
+                  transaction_id: TXN-D20A7935
+                  product_id: PRD-001
+                  quantity: 2
+                  unit_price: 75000
+                  customer_id: CUST-042
+                event:
+                  event_type: SALE_COMPLETED
+                  event_id: 91f3c101-41ec-4252-9e16-7da9b84734e4
+                  product_id: PRD-001
+                  quantity: 2
+                  unit_price: 75000
+                  customer_id: CUST-042
+                  transaction_id: TXN-D20A7935
+                  timestamp: "2026-06-12T12:45:56.414Z"
+        "400":
+          description: Field wajib tidak lengkap
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "404":
+          description: Produk tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # INVENTORY SERVICE
+  /inventory/health:
+    get:
+      tags: [Inventory Service]
+      summary: Health check
+      servers:
+        - url: http://localhost:8002
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                service: inventory-service
+                status: ok
+
+  /inventory/stock:
+    get:
+      tags: [Inventory Service]
+      summary: Daftar stok produk
+      servers:
+        - url: http://localhost:8002
+      responses:
+        "200":
+          description: Daftar stok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Stock'
+              example:
+                - sku_code: PRD-001
+                  product_name: Cumi Hitam Pak Kris
+                  quantity: 96
+                - sku_code: PRD-002
+                  product_name: Oseng Oseng Biawak
+                  quantity: 100
+
+  /inventory/stock/movements:
+    get:
+      tags: [Inventory Service]
+      summary: Riwayat pergerakan stok
+      servers:
+        - url: http://localhost:8002
+      responses:
+        "200":
+          description: Riwayat pergerakan stok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/StockMovement'
+
+  /inventory/soap:
+    post:
+      tags: [Inventory Service]
+      summary: "[Message Translator Target] Kurangi stok via SOAP/XML"
+      description: |
+        Endpoint ini **tidak dipanggil langsung oleh client/POS**, melainkan
+        oleh **Integration Service** setelah melakukan transformasi
+        (Message Translator) dari payload JSON CDM menjadi SOAP/XML.
+
+        **Field Mapping dari CDM:**
+
+        | CDM (JSON)       | SOAP (XML)          |
+        |------------------|---------------------|
+        | `product_id`     | `sku_code`          |
+        | `quantity`       | `quantity_deducted` |
+        | `transaction_id` | `reference_id`      |
+      servers:
+        - url: http://localhost:8002
+      requestBody:
+        required: true
+        content:
+          text/xml:
+            schema:
+              type: string
+            example: |
+              <?xml version="1.0" encoding="UTF-8"?>
+              <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+                <soap:Body>
+                  <DeductStock xmlns="http://inventory.example.com/soap">
+                    <sku_code>PRD-001</sku_code>
+                    <quantity_deducted>2</quantity_deducted>
+                    <reference_id>TXN-D20A7935</reference_id>
+                  </DeductStock>
+                </soap:Body>
+              </soap:Envelope>
+      responses:
+        "200":
+          description: Stok berhasil dikurangi
+          content:
+            text/xml:
+              schema:
+                type: string
+              example: |
+                <?xml version="1.0" encoding="UTF-8"?>
+                <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+                  <soap:Body>
+                    <DeductStockResponse xmlns="http://inventory.example.com/soap">
+                      <status>SUCCESS</status>
+                      <sku_code>PRD-001</sku_code>
+                      <remaining_quantity>96</remaining_quantity>
+                      <reference_id>TXN-D20A7935</reference_id>
+                    </DeductStockResponse>
+                  </soap:Body>
+                </soap:Envelope>
+        "404":
+          description: SKU tidak ditemukan
+          content:
+            text/xml:
+              schema:
+                type: string
+        "500":
+          description: Error pemrosesan XML
+          content:
+            text/xml:
+              schema:
+                type: string
+
+  # CRM SERVICE
+  /crm/health:
+    get:
+      tags: [CRM Service]
+      summary: Health check
+      servers:
+        - url: http://localhost:8003
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                service: crm-service
+
+  /crm/customers:
+    get:
+      tags: [CRM Service]
+      summary: Daftar pelanggan
+      servers:
+        - url: http://localhost:8003
+      responses:
+        "200":
+          description: Daftar pelanggan
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Customer'
+
+  /crm/customers/{id}:
+    get:
+      tags: [CRM Service]
+      summary: Detail pelanggan
+      servers:
+        - url: http://localhost:8003
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: CUST-042
+      responses:
+        "200":
+          description: Detail pelanggan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+        "404":
+          description: Pelanggan tidak ditemukan
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /crm/purchase-history:
+    get:
+      tags: [CRM Service]
+      summary: Riwayat pembelian semua pelanggan
+      servers:
+        - url: http://localhost:8003
+      responses:
+        "200":
+          description: Riwayat pembelian
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PurchaseHistory'
+
+  /crm/customers/update-from-sale:
+    post:
+      tags: [CRM Service]
+      summary: "[Message Translator Target] Update profil pelanggan dari event penjualan"
+      description: |
+        Endpoint ini **tidak dipanggil langsung oleh client/POS**, melainkan
+        oleh **Integration Service** setelah melakukan field mapping dari
+        payload CDM ke skema CRM.
+
+        **Field Mapping dari CDM:**
+
+        | CDM (JSON)       | CRM (JSON)     |
+        |------------------|----------------|
+        | `product_id`     | `item_ref`     |
+        | `customer_id`    | `member_code`  |
+        | `transaction_id` | `tx_ref`       |
+        | `quantity`       | `quantity`     |
+        | `unit_price`     | `unit_price`   |
+
+        Poin loyalty dihitung otomatis: 1 poin per Rp 10.000 dari total
+        (`quantity * unit_price`).
+      servers:
+        - url: http://localhost:8003
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CrmUpdateRequest'
+            example:
+              item_ref: PRD-001
+              member_code: CUST-042
+              tx_ref: TXN-D20A7935
+              quantity: 2
+              unit_price: 75000
+      responses:
+        "200":
+          description: Profil pelanggan berhasil diperbarui
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CrmUpdateResponse'
+              example:
+                message: Customer profile updated
+                customer:
+                  customer_id: CUST-042
+                  name: Topek
+                  loyalty_points: 30
+                  total_purchases: 300000
+                points_earned: 15
+        "400":
+          description: Field wajib tidak lengkap
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        service:
+          type: string
+          example: pos-service
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: Product not found
+
+    Product:
+      type: object
+      properties:
+        product_id:
+          type: string
+          example: PRD-001
+        name:
+          type: string
+          example: Cumi Hitam Pak Kris
+        unit_price:
+          type: integer
+          example: 75000
+
+    Transaction:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+          example: TXN-D20A7935
+        product_id:
+          type: string
+          example: PRD-001
+        quantity:
+          type: integer
+          example: 2
+        unit_price:
+          type: integer
+          example: 75000
+        customer_id:
+          type: string
+          example: CUST-042
+        created_at:
+          type: string
+          format: date-time
+
+    TransactionRequest:
+      type: object
+      required: [product_id, quantity, customer_id]
+      properties:
+        product_id:
+          type: string
+          example: PRD-001
+        quantity:
+          type: integer
+          example: 2
+        customer_id:
+          type: string
+          example: CUST-042
+
+    CdmEvent:
+      type: object
+      description: Canonical Data Model (CDM) - skema pesan internal yang dipublikasikan ke RabbitMQ
+      properties:
+        event_type:
+          type: string
+          enum: [SALE_COMPLETED, RESTOCK]
+          example: SALE_COMPLETED
+        event_id:
+          type: string
+          format: uuid
+        product_id:
+          type: string
+          example: PRD-001
+        quantity:
+          type: integer
+          example: 2
+        unit_price:
+          type: integer
+          example: 75000
+        customer_id:
+          type: string
+          example: CUST-042
+        transaction_id:
+          type: string
+          example: TXN-D20A7935
+        timestamp:
+          type: string
+          format: date-time
+
+    TransactionResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        transaction:
+          $ref: '#/components/schemas/Transaction'
+        event:
+          $ref: '#/components/schemas/CdmEvent'
+
+    Stock:
+      type: object
+      properties:
+        sku_code:
+          type: string
+          example: PRD-001
+        product_name:
+          type: string
+          example: Cumi Hitam Pak Kris
+        quantity:
+          type: integer
+          example: 96
+
+    StockMovement:
+      type: object
+      properties:
+        id:
+          type: integer
+        sku_code:
+          type: string
+          example: PRD-001
+        quantity_deducted:
+          type: integer
+          example: 2
+        reference_id:
+          type: string
+          example: TXN-D20A7935
+        created_at:
+          type: string
+          format: date-time
+
+    Customer:
+      type: object
+      properties:
+        customer_id:
+          type: string
+          example: CUST-042
+        name:
+          type: string
+          example: Topek
+        loyalty_points:
+          type: integer
+          example: 30
+        total_purchases:
+          type: integer
+          example: 300000
+
+    PurchaseHistory:
+      type: object
+      properties:
+        id:
+          type: integer
+        customer_id:
+          type: string
+          example: CUST-042
+        transaction_id:
+          type: string
+          example: TXN-D20A7935
+        product_id:
+          type: string
+          example: PRD-001
+        quantity:
+          type: integer
+          example: 2
+        amount:
+          type: integer
+          example: 150000
+        created_at:
+          type: string
+          format: date-time
+
+    CrmUpdateRequest:
+      type: object
+      required: [member_code, tx_ref, quantity, unit_price]
+      properties:
+        item_ref:
+          type: string
+          example: PRD-001
+        member_code:
+          type: string
+          example: CUST-042
+        tx_ref:
+          type: string
+          example: TXN-D20A7935
+        quantity:
+          type: integer
+          example: 2
+        unit_price:
+          type: integer
+          example: 75000
+
+    CrmUpdateResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        customer:
+          $ref: '#/components/schemas/Customer'
+        points_earned:
+          type: integer
+          example: 15
