@@ -10,7 +10,7 @@ http://localhost:8003/health
 
 #jalankan demo.html :
 python -m http.server 5500
-http://localhost:5500/demo.html (copy yang ini lgsg)
+http://localhost:5500/anu/demo.html (copy yang ini lgsg)
 
 #lihat visual rabbitmq :
 http://localhost:15672
